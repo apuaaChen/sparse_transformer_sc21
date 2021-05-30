@@ -30,7 +30,14 @@ parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
 parser.add_argument('--sparsity', type=float, default=0.9, help='mask sparsity')
 parser.add_argument('--vec_length', type=int, default=8, help='vector length')
 parser.add_argument('--model', choices=['sparse', 'dense', 'both'], default='sparse', help='which model to launch')
+parser.add_argument('--mem', action='store_true', help="If set, the peak memory usage will be reported")
 args = parser.parse_args()
+
+def profile_(model):
+    if args.mem and (model == args.model or args.model == 'both'):
+        return profile
+    else:
+        return lambda a: a
 
 
 class SparseTransformerBlock(nn.Module):
@@ -47,7 +54,6 @@ class SparseTransformerBlock(nn.Module):
         self.linear1 = nn.Linear(embed_dim, mlp_dim)
         self.linear2 = nn.Linear(mlp_dim, embed_dim)
 
-    # @profile
     def forward(self, x):
         with nvtx.annotate("Layer Norm 1"):
             out = self.layer_norm1(x)
@@ -78,7 +84,6 @@ class TransformerBlock(nn.Module):
         self.linear1 = nn.Linear(embed_dim, mlp_dim).cuda()
         self.linear2 = nn.Linear(mlp_dim, embed_dim).cuda()
 
-    # @profile
     def forward(self, x):
         with nvtx.annotate("Layer Norm 1"):
             out = self.layer_norm1(x)
@@ -128,7 +133,7 @@ class SparseTransformerEncoder(nn.Module):
         self.layer_norm = nn.LayerNorm(normalized_shape=embed_dim)
         self.linear = nn.Linear(embed_dim, num_class)
 
-    @profile
+    @profile_('sparse')
     def forward(self, x):
         out = self.encoder(x) * np.sqrt(self.embed_dim)
         out = torch.transpose(out, 0, 1)
@@ -155,7 +160,7 @@ class TransformerEncoder(nn.Module):
         self.layer_norm = nn.LayerNorm(normalized_shape=embed_dim)
         self.linear = nn.Linear(embed_dim, num_class)
 
-    # @profile
+    @profile_('dense')
     def forward(self, x):
         out = self.encoder(x) * np.sqrt(self.embed_dim)
         out = torch.transpose(out, 0, 1)
@@ -182,18 +187,17 @@ def sparse_profile():
     spTrans.cuda().eval().half()
 
     x = torch.randint(low=0, high=args.vocab_size, size=(args.bs, args.seq_len), dtype=torch.int32, device='cuda')
-    out = spTrans(x)
-    print(out)
-    """
-    # warm up
-    for i in range(10):
+    if args.mem:
         out = spTrans(x)
-
-    # profile
-    for i in range(10):
-        with nvtx.annotate("Sparse Encoder"):
+    else:
+        # warm up
+        for i in range(10):
             out = spTrans(x)
-    """
+
+        # profile
+        for i in range(10):
+            with nvtx.annotate("Sparse Encoder"):
+                out = spTrans(x)
     
 def dense_prof():
     denseTrans = TransformerEncoder(
@@ -207,17 +211,17 @@ def dense_prof():
     denseTrans.cuda().eval().half()
 
     x = torch.randint(low=0, high=args.vocab_size, size=(args.bs, args.seq_len), dtype=torch.int32, device='cuda')
-    out = denseTrans(x)
-    """
-    # warm up
-    for i in range(10):
+    if args.mem:
         out = denseTrans(x)
-
-    # profile
-    for i in range(10):
-        with nvtx.annotate("Dense Encoder"):
+    else:
+        # warm up
+        for i in range(10):
             out = denseTrans(x)
-    """
+
+        # profile
+        for i in range(10):
+            with nvtx.annotate("Dense Encoder"):
+                out = denseTrans(x)
     
 
 if args.model == "sparse":
@@ -227,33 +231,3 @@ elif args.model == "dense":
 else:
     sparse_profile()
     dense_prof()
-
-
-"""
-
-spblock = SparseTransformerBlock(embed_dim=args.embed_dim, num_heads=args.num_heads, sparsity=args.sparsity, seq_len=args.seq_len, mlp_dim=args.mlp_dim).cuda().eval().half()
-block = TransformerBlock(embed_dim=args.embed_dim, num_heads=args.num_heads, mlp_dim=args.mlp_dim).cuda().eval().half()
-block_float = TransformerBlock(embed_dim=args.embed_dim, num_heads=args.num_heads, mlp_dim=args.mlp_dim).cuda().eval()
-
-x = torch.randn(size=(args.seq_len, args.bs, args.embed_dim), dtype=torch.float16, device='cuda')
-x_float = torch.randn(size=(args.seq_len, args.bs, args.embed_dim), dtype=torch.float32, device='cuda')
-
-for i in range(10):
-    y = block(x)
-
-for i in range(5):
-    with nvtx.annotate("Transformer Block"):
-        y = block(x)
-
-for i in range(5):
-    with nvtx.annotate("Sparse Transformer Block"):
-        y = spblock(x)
-
-for i in range(10):
-    y_f = block_float(x_float)
-
-for i in range(5):
-    with nvtx.annotate("Transformer Block"):
-        y_f = block_float(x_float)
-
-"""
